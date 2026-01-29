@@ -1,639 +1,925 @@
 // ==UserScript==
 // @name         Shared Piano Playbot
 // @namespace    http://qriositylog.com/
-// @version      v1.0
-// @description  no desc
+// @version      2.0
+// @description  Fast MIDI playback with draggable UI panel, seek, unlimited speed, pause/resume/stop, transpose, sustain for the chrome Shared Piano Experiment
 // @author       Queue-ri
-// @match        https://musiclab.chromeexperiments.com/Shared-Piano/
-// @icon         https://www.google.com/s2/favicons?domain=chromeexperiments.com
-// @require      https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js
-// @require      https://unpkg.com/@tonejs/midi
+// @match        https://musiclab.chromeexperiments.com/Shared-Piano/*
+// @run-at       document-idle
+// @grant        none
+// @require      https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js
 // ==/UserScript==
-/* global parcelRequire */
+/* global Midi */
 
-// const module = import('https://unpkg.com/@tonejs/data'); // 다시 실행이 안됨
+(function () {
+  'use strict';
 
-var input = document.createElement('input');
-input.type = 'file';
-input.accept=".mid"
-input.onchange = e => {
-   var file = e.target.files[0];
-   var path = (window.URL || window.webkitURL).createObjectURL(file);
-   getData(path)
-}
-async function getData(path) {
-   const data = await Midi.fromUrl(path); // await 안쓰면 Promise 반환됨
-   console.log(data);
-   bpm = Math.floor(data.header.tempos[0].bpm);
-   sus_interval = 480000 / bpm // 2마디
-   if (sus_interval > 3) sus_interval /= 2;
-   notes = merge(data);
-}
+  // -------------------- Utilities --------------------
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const whenDefined = (tag) => customElements.whenDefined(tag);
+  const nowSec = () => performance.now() / 1000;
+  const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+  const lsGet = (k, d=null) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } };
+  const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 
-// 7옥타브 고정. 옥타브 관련 tst 스니펫과 메모장 참고. 나중에 Promise 처리하기
-var setting = document.querySelector('piano-settings');
-setting.resizeMode = "manual";
-setting.octaves = 7;
+  const waitFor = (sel, root = document) =>
+    new Promise((resolve) => {
+      const t = setInterval(() => {
+        const el = root.querySelector(sel);
+        if (el) { clearInterval(t); resolve(el); }
+      }, 100);
+    });
 
-
-// 메트로놈
-// let module_metronome = parcelRequire(["O4Jr"], null);
-// let metronome = module_metronome.Metronome;
-// let Met = new metronome();
-// use as 'met.play();' or 'var met_html = Met.render().getHTML();' ...
-
-var html_str = document.getElementById('action-buttons').innerHTML;
-var met_html = `
-        <piano-metronome>
-            <piano-button label="shared_piano_metronome_label">
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 37.47 32.86" stroke="#5f6368">
-        	        <path fill="none" stroke-width="3" d="M18.63,1.57s0-.05.05-.05l.07,0,.07,0s0,0,.05.05L36,31.14a.14.14,0,0,1,0,.07.31.31,0,0,1,0,.08l-.05.05-.08,0H1.68a.15.15,0,0,1-.08,0l-.05-.05a.31.31,0,0,1,0-.08.14.14,0,0,1,0-.07Z"/>
-                    <line x1="18.97" y1="31.73" x2="6.77" y2="10.61" fill="none" stroke-width="3" />
-                    <circle cx="5.61" cy="7.39" r="4.11" fill="none" stroke-width="3"/>
-                </svg>
-            </piano-button>
-
-            <style>
-            piano-button {
-                left: 8px;
-                position: relative;
-            }
-            piano-button.active {
-                --button-bg-color: #0490E7;
-                --button-bg-hover-color:  #0490E7;
-            }
-            svg {
-                position: relative;
-                top: -1px;
-                left: 1px;
-            }
-            </style>
-        </piano-metronome>
-`
-
-// document.getElementById('action-buttons').innerHTML = html_str + met_html;
-document.getElementById('action-buttons').insertAdjacentHTML('afterbegin', met_html);
-
-// let met_btn = document.querySelectorAll('piano-button')[1];
-// met_btn.onclick = function() {
-//     Met.enabled = !Met.enabled;
-//     met_btn.className = Met.enabled ? "active" : "";
-//     document.querySelectorAll('svg')[2].setAttribute("stroke", Met.enabled ? "white" : "#5f6368");
-//     Met.updated();
-// }
-
-
-// Transpose Indicator
-var transpose_html = `
-        <transpose-indicator>
-            <div><span><strong>Transpose: </strong></span><span id="offset-value">0</span></div>
-            <style>
-                transpose-indicator {
-                    font-size: 16px;
-                    padding: 10px 22px 10px 19px;
-                    background-color: white;
-                    border: 1px solid rgb(204, 204, 204);
-                    border-radius: 6px;
-                    width: auto;
-                }
-            </style>
-        </transpose-indicator>
-`
-document.querySelector('#footer-config > piano-instrument-selector').insertAdjacentHTML('afterend', transpose_html);
-
-
-// Header Sub Logo
-var sublogo_html = `
-        <sub-logo>
-            bot 1.0
-            <style>
-                sub-logo {
-                    font-family: Quicksand, sans-serif;
-                    text-transform: uppercase;
-                    font-weight: 700;
-                    color: white;
-                    text-align: center;
-                    font-size: 12px;
-                    letter-spacing: 1px;
-                    margin: auto;
-                    margin-left: 10px;
-                    padding: 5px 12px 5px 12px;
-                    background-color: #b064ff;
-                    border: none;
-                    border-radius: 7px;
-                }
-            </style>
-        </sub-logo>
-`
-document.querySelector('piano-logo').shadowRoot.getElementById('header-logo').insertAdjacentHTML('afterend', sublogo_html);
-
-
-// https://musiclab.chromeexperiments.com/Shared-Piano
-// dev tool에서 돌리면 width 따라 undefine 인식될 수 있으니 주의
-// p# = piano octave # (ex. p3 == piano octave 3)
-let p = document.querySelector('#piano > piano-keyboard').shadowRoot.querySelectorAll("#container > piano-keyboard-octave");
-let p1 = p[0].shadowRoot;
-let p2 = p[1].shadowRoot;
-let p3 = p[2].shadowRoot;
-let p4 = p[3].shadowRoot;
-let p5 = p[4].shadowRoot;
-let p6 = p[5].shadowRoot;
-let p7 = p[6].shadowRoot;
-// console.log(t0);
-
-let w1 = p1.querySelectorAll("#container > #white-notes > piano-keyboard-note");
-let w2 = p2.querySelectorAll("#container > #white-notes > piano-keyboard-note");
-let w3 = p3.querySelectorAll("#container > #white-notes > piano-keyboard-note");
-let w4 = p4.querySelectorAll("#container > #white-notes > piano-keyboard-note");
-let w5 = p5.querySelectorAll("#container > #white-notes > piano-keyboard-note");
-let w6 = p6.querySelectorAll("#container > #white-notes > piano-keyboard-note");
-let w7 = p7.querySelectorAll("#container > #white-notes > piano-keyboard-note");
-
-let b1 = p1.querySelectorAll("#container > #black-notes > piano-keyboard-note");
-let b2 = p2.querySelectorAll("#container > #black-notes > piano-keyboard-note");
-let b3 = p3.querySelectorAll("#container > #black-notes > piano-keyboard-note");
-let b4 = p4.querySelectorAll("#container > #black-notes > piano-keyboard-note");
-let b5 = p5.querySelectorAll("#container > #black-notes > piano-keyboard-note");
-let b6 = p6.querySelectorAll("#container > #black-notes > piano-keyboard-note");
-let b7 = p7.querySelectorAll("#container > #black-notes > piano-keyboard-note");
-// console.log(b) // only idx 1,2,4,5,6 avail for black notes
-
-let C1 = w1[0];
-let CS1 = b1[1];
-let D1 = w1[1];
-let DS1 = b1[2];
-let E1 = w1[2];
-let F1 = w1[3];
-let FS1 = b1[4];
-let G1 = w1[4];
-let GS1 = b1[5];
-let A1 = w1[5];
-let AS1 = b1[6];
-let B1 = w1[6];
-
-let C2 = w2[0];
-let CS2 = b2[1];
-let D2 = w2[1];
-let DS2 = b2[2];
-let E2 = w2[2];
-let F2 = w2[3];
-let FS2 = b2[4];
-let G2 = w2[4];
-let GS2 = b2[5];
-let A2 = w2[5];
-let AS2 = b2[6];
-let B2 = w2[6];
-
-let C3 = w3[0];
-let CS3 = b3[1];
-let D3 = w3[1];
-let DS3 = b3[2];
-let E3 = w3[2];
-let F3 = w3[3];
-let FS3 = b3[4];
-let G3 = w3[4];
-let GS3 = b3[5];
-let A3 = w3[5];
-let AS3 = b3[6];
-let B3 = w3[6];
-
-let C4 = w4[0];
-let CS4 = b4[1];
-let D4 = w4[1];
-let DS4 = b4[2];
-let E4 = w4[2];
-let F4 = w4[3];
-let FS4 = b4[4];
-let G4 = w4[4];
-let GS4 = b4[5];
-let A4 = w4[5];
-let AS4 = b4[6];
-let B4 = w4[6];
-
-let C5 = w5[0];
-let CS5 = b5[1];
-let D5 = w5[1];
-let DS5 = b5[2];
-let E5 = w5[2];
-let F5 = w5[3];
-let FS5 = b5[4];
-let G5 = w5[4];
-let GS5 = b5[5];
-let A5 = w5[5];
-let AS5 = b5[6];
-let B5 = w5[6];
-
-let C6 = w6[0];
-let CS6 = b6[1];
-let D6 = w6[1];
-let DS6 = b6[2];
-let E6 = w6[2];
-let F6 = w6[3];
-let FS6 = b6[4];
-let G6 = w6[4];
-let GS6 = b6[5];
-let A6 = w6[5];
-let AS6 = b6[6];
-let B6 = w6[6];
-
-let C7 = w7[0];
-let CS7 = b7[1];
-let D7 = w7[1];
-let DS7 = b7[2];
-let E7 = w7[2];
-let F7 = w7[3];
-let FS7 = b7[4];
-let G7 = w7[4];
-let GS7 = b7[5];
-let A7 = w7[5];
-let AS7 = b7[6];
-let B7 = w7[6];
-
-
-// data:json -> notes:merged data
-let data = {};
-let notes = []; // merged tracks
-let selected_tracks = [];
-let bpm;
-let sus_interval;
-
-// 서스테인
-function sustain() {
-    document.dispatchEvent(new KeyboardEvent("keydown",{
-        keyCode: 16,
-    }));
-}
-
-function release() {
-    document.dispatchEvent(new KeyboardEvent("keyup",{
-        keyCode: 16,
-    }));
-}
-
-
-// current note time & sustain event id
-var st = 0;
-var id;
-
-/* data.tracks[1].notes.forEach(function(note) {
-     setTimeout(function(){
-             // console.log(note.name, (note.time - st)*1000);
-             press_and_schedule(note.name, note.duration*1000);
-             st=note.time;
-             }, (note.time - st)*1000);
-});*/
-
-function nonblock_wait(duration) {
-    return new Promise(resolve => setTimeout(resolve, duration));
-}
-
-async function start() {
-    sustain();
-    id = setInterval(function() {release(); sustain();}, sus_interval);
-    for (let i = 0, n = notes.length; i < n; ++i) {
-        let duration = (notes[i].time - st)*1000;
-        if (duration > 1) await nonblock_wait(duration); // 1ms 정도는 대기 스킵
-        st = notes[i].time;
-        press_and_schedule(notes[i].name, notes[i].duration*1000);
+  // -------------------- Autoplay (Chrome policy) --------------------
+  async function resumeAudioIfNeeded() {
+    try {
+      if (window.Tone?.start) {
+        await window.Tone.start();
+      } else {
+        const ctx =
+          window.Tone?.getContext?.()?.rawContext ||
+          window.audioContext ||
+          null;
+        if (ctx?.state === 'suspended') await ctx.resume();
+      }
+    } catch (e) {
+      console.debug('Audio resume attempt failed (non-fatal)', e);
     }
-    clearInterval(id);
-}
+  }
 
-function merge(data) {
-    let notes = data.tracks[0].notes;
-    for (let i = 1, len = data.tracks.length; i < len; ++i) {
-        let note = data.tracks[i].notes;
+  // -------------------- File input --------------------
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.mid,.midi';
+  input.style.display = 'none';
+  document.body.appendChild(input);
 
-        for (let j = 0; j < note.length; ++j) {
-            let idx = find_idx(notes, note[j].time);
+  // -------------------- Global state --------------------
+  let notes = [];                // sorted merged notes
+  let pieceDurationSec = 0;      // original total piece duration (seconds)
 
-            notes.splice(idx, 0, note[j]);
+  let transposeOffset = 0;       // semitones
+  let bpm = 120;
+
+  // Sustain
+  let sustainMs = 2000;
+  let autoSustain = true;
+  let linkSustainToTempo = true; // link sustain interval to speed factor
+
+  // Speed (unlimited via manual input)
+  let speedFactor = 1.0;
+
+  // Scheduler state
+  let playState = 'stopped';     // 'stopped' | 'playing' | 'paused'
+  let startEpoch = 0;            // performance time at (re)start
+  let offsetTimeSec = 0;         // effective timeline seconds (already scaled by speed)
+  let currentIndex = 0;          // next note to schedule
+  let scheduleTimer = null;      // setInterval handle
+  let sustainTimer = null;       // sustain retrigger interval
+  let lookaheadMs = 25;          // scheduler tick interval (configurable)
+  let scheduleAheadSec = 0.20;   // how far ahead to schedule (configurable)
+  let progressTimer = null;      // seek bar updater
+
+  // Prewarm state
+  const warmedOctaves = new Set(); // e.g., '3','4','5'
+
+  // Keyboard DOM mapping
+  let p = [];       // octaves
+  const keys = {};  // 'C#4' -> element
+  let pianoInput = null;   // <piano-input> API (keyDown/keyUp)
+
+  // UI elements
+  let ui = {};
+
+  // -------------------- MIDI loading & prep --------------------
+  function parseAndPrepareMidi(midi) {
+    const all = [];
+    midi.tracks.forEach(t => {
+      t.notes.forEach(n => {
+        all.push({
+          name: n.name,        // "C#4"
+          midi: n.midi,        // 0..127
+          time: n.time,        // seconds (original timeline)
+          duration: n.duration // seconds
+        });
+      });
+    });
+    all.sort((a, b) => (a.time - b.time) || (a.midi - b.midi));
+    notes = all;
+
+    // compute piece duration in original timeline
+    pieceDurationSec = 0;
+    for (const n of notes) {
+      pieceDurationSec = Math.max(pieceDurationSec, n.time + n.duration);
+    }
+
+    bpm = Math.floor(midi.header.tempos?.[0]?.bpm || 120);
+    sustainMs = 480000 / bpm;    // 4 measures in ms at given BPM
+    if (sustainMs > 3000) sustainMs /= 2;
+
+    updateStatus(`Loaded. BPM=${bpm}  Notes=${notes.length}  Dur=${pieceDurationSec.toFixed(2)}s`);
+    updateSeekRange();      // refresh seek slider max
+    prewarmUsedOctavesSoon();
+  }
+
+  input.addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const midi = new Midi(ev.target.result);
+        parseAndPrepareMidi(midi);
+        // reset playback state for new song
+        stop();
+      } catch (err) {
+        console.error('MIDI parse failed', err);
+        updateStatus('Failed to parse MIDI.');
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  });
+
+  // -------------------- Note name <-> MIDI helpers --------------------
+  const NOTE_TO_SEMITONE = {
+    'C': 0, 'C#': 1, 'D': 2, 'D#': 3, 'E': 4,
+    'F': 5, 'F#': 6, 'G': 7, 'G#': 8, 'A': 9, 'A#': 10, 'B': 11
+  };
+  const SEMITONE_TO_NOTE = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+
+  function nameToMidi(name) {
+    const m = /^([A-G]#?)(-?\d+)$/.exec(name);
+    if (!m) return null;
+    const pitch = m[1];
+    const oct = parseInt(m[2], 10);
+    return (oct + 1) * 12 + NOTE_TO_SEMITONE[pitch];
+  }
+  function midiToName(midi) {
+    const n = ((midi % 12) + 12) % 12;
+    const oct = Math.floor(midi / 12) - 1;
+    return `${SEMITONE_TO_NOTE[n]}${oct}`;
+  }
+  function transposedName(name, offset) {
+    const m = nameToMidi(name);
+    if (m == null) return name;
+    const mm = clamp(m + offset, 24, 107); // clamp to C1..B7 for Shared Piano
+    return midiToName(mm);
+  }
+  function nameToOctave(name) {
+    const m = /^([A-G]#?)(-?\d+)$/.exec(name);
+    return m ? m[2] : null;
+  }
+
+  // -------------------- Keyboard mapping --------------------
+  async function mapKeyboard() {
+    const kbHost = await waitFor('#piano > piano-keyboard');
+    pianoInput = document.querySelector('piano-input') || null;
+
+    const octaves = kbHost.shadowRoot.querySelectorAll('#container > piano-keyboard-octave');
+    if (!octaves?.length) {
+      await wait(300);
+      return mapKeyboard();
+    }
+    p = [...octaves];
+
+    const whites = p.map((o) => o.shadowRoot.querySelectorAll('#container > #white-notes > piano-keyboard-note'));
+    const blacks = p.map((o) => o.shadowRoot.querySelectorAll('#container > #black-notes > piano-keyboard-note'));
+    const sharpIndexMap = { 'C#': 1, 'D#': 2, 'F#': 4, 'G#': 5, 'A#': 6 };
+
+    for (let octave = 1; octave <= 7; octave++) {
+      const w = whites[octave - 1];
+      const b = blacks[octave - 1];
+      if (!w || !b || w.length < 7) continue;
+      // White notes
+      keys[`C${octave}`] = w[0];
+      keys[`D${octave}`] = w[1];
+      keys[`E${octave}`] = w[2];
+      keys[`F${octave}`] = w[3];
+      keys[`G${octave}`] = w[4];
+      keys[`A${octave}`] = w[5];
+      keys[`B${octave}`] = w[6];
+      // Black notes
+      for (const [name, idx] of Object.entries(sharpIndexMap)) {
+        keys[`${name}${octave}`] = b[idx];
+      }
+    }
+
+    // Optional: force 7 octaves manual sizing if available
+    const setting = document.querySelector('piano-settings');
+    if (setting) {
+      setting.resizeMode = 'manual';
+      setting.octaves = 7;
+    }
+  }
+
+  // -------------------- Sustain helpers --------------------
+  function sustainDown() {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift', code: 'ShiftLeft', keyCode: 16 }));
+  }
+  function sustainUp() {
+    document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Shift', code: 'ShiftLeft', keyCode: 16 }));
+  }
+  function effectiveSustainIntervalMs() {
+    return linkSustainToTempo ? Math.max(10, Math.round(sustainMs / Math.max(0.0001, speedFactor))) : sustainMs;
+  }
+  function beginAutoSustain() {
+    if (!autoSustain) return;
+    clearInterval(sustainTimer);
+    sustainDown();
+    sustainTimer = setInterval(() => { sustainUp(); sustainDown(); }, effectiveSustainIntervalMs());
+  }
+  function stopAutoSustain() {
+    clearInterval(sustainTimer);
+    sustainUp();
+  }
+
+  // -------------------- Press logic (prefer piano-input) --------------------
+  function press_and_schedule(name, durationMs) {
+    const midi = nameToMidi(name);
+    // Prefer using the official input API if present (more reliable for samples)
+    if (pianoInput && typeof pianoInput.keyDown === 'function' && midi != null) {
+      try {
+        pianoInput.keyDown(midi, 0.75); // velocity
+        const t = setTimeout(() => {
+          try { pianoInput.keyUp(midi); } catch {}
+        }, Math.max(1, durationMs));
+        return;
+      } catch (e) {
+        // fall through to clicked fallback
+      }
+    }
+    // Fallback: visual "clicked" toggle
+    const el = keys[name];
+    if (!el) return;
+    el.clicked = true;
+    setTimeout(() => { el.clicked = false; }, Math.max(1, durationMs));
+  }
+
+  // -------------------- Readiness & prewarm --------------------
+  async function ensureInstrumentReady() {
+    await customElements.whenDefined('piano-keyboard');
+    await customElements.whenDefined('piano-input');
+
+    // Probe C4 to ensure internal sampler is initialized
+    const probe = async () => {
+      const tap = (name) => {
+        const m = nameToMidi(name);
+        if (pianoInput && typeof pianoInput.keyDown === 'function' && m != null) {
+          try {
+            pianoInput.keyDown(m, 0.3);
+            setTimeout(() => { try { pianoInput.keyUp(m); } catch {} }, 6);
+            return true;
+          } catch {}
         }
-    }
-    return notes;
-}
+        const el = keys[name];
+        if (!el) return false;
+        el.clicked = true; setTimeout(() => { el.clicked = false; }, 6);
+        return true;
+      };
+      return tap('C4');
+    };
 
-function find_idx(notes, target) {
-   for (let i = 0; i < notes.length; ++i) {
-        if (notes[i].time > target) return i;
+    const start = performance.now();
+    while (true) {
+      const ok = await probe();
+      if (ok) break;
+      await wait(150);
+      if (performance.now() - start > 10000) break;
     }
-    return notes.length;
-}
+  }
 
-// duration (ms)
-async function press_and_schedule(key, duration) {
-            switch (key) {
-            case "C1":
-                C1.clicked = true; await nonblock_wait(duration); C1.clicked = false; break;
-            case "C#1":
-                CS1.clicked = true; await nonblock_wait(duration); CS1.clicked = false; break;
-            case "D1":
-                D1.clicked = true; await nonblock_wait(duration); D1.clicked = false; break;
-            case "D#1":
-                DS1.clicked = true; await nonblock_wait(duration); DS1.clicked = false; break;
-            case "E1":
-                E1.clicked = true; await nonblock_wait(duration); E1.clicked = false; break;
-            case "F1":
-                F1.clicked = true; await nonblock_wait(duration); F1.clicked = false; break;
-            case "F#1":
-                FS1.clicked = true; await nonblock_wait(duration); FS1.clicked = false; break;
-            case "G1":
-                G1.clicked = true; await nonblock_wait(duration); G1.clicked = false; break;
-            case "G#1":
-                GS1.clicked = true; await nonblock_wait(duration); GS1.clicked = false; break;
-            case "A1":
-                A1.clicked = true; await nonblock_wait(duration); A1.clicked = false; break;
-            case "A#1":
-                AS1.clicked = true; await nonblock_wait(duration); AS1.clicked = false; break;
-            case "B1":
-                B1.clicked = true; await nonblock_wait(duration); B1.clicked = false; break;
-            /////////////////////////////
-            case "C2":
-                C2.clicked = true; await nonblock_wait(duration); C2.clicked = false; break;
-            case "C#2":
-                CS2.clicked = true; await nonblock_wait(duration); CS2.clicked = false; break;
-            case "D2":
-                D2.clicked = true; await nonblock_wait(duration); D2.clicked = false; break;
-            case "D#2":
-                DS2.clicked = true; await nonblock_wait(duration); DS2.clicked = false; break;
-            case "E2":
-                E2.clicked = true; await nonblock_wait(duration); E2.clicked = false; break;
-            case "F2":
-                F2.clicked = true; await nonblock_wait(duration); F2.clicked = false; break;
-            case "F#2":
-                FS2.clicked = true; await nonblock_wait(duration); FS2.clicked = false; break;
-            case "G2":
-                G2.clicked = true; await nonblock_wait(duration); G2.clicked = false; break;
-            case "G#2":
-                GS2.clicked = true; await nonblock_wait(duration); GS2.clicked = false; break;
-            case "A2":
-                A2.clicked = true; await nonblock_wait(duration); A2.clicked = false; break;
-            case "A#2":
-                AS2.clicked = true; await nonblock_wait(duration); AS2.clicked = false; break;
-            case "B2":
-                B2.clicked = true; await nonblock_wait(duration); B2.clicked = false; break;
-            /////////////////////////////
-            case "C3":
-                C3.clicked = true; await nonblock_wait(duration); C3.clicked = false; break;
-            case "C#3":
-                CS3.clicked = true; await nonblock_wait(duration); CS3.clicked = false; break;
-            case "D3":
-                D3.clicked = true; await nonblock_wait(duration); D3.clicked = false; break;
-            case "D#3":
-               DS3.clicked = true; await nonblock_wait(duration); DS3.clicked = false; break;
-            case "E3":
-                E3.clicked = true; await nonblock_wait(duration); E3.clicked = false; break;
-            case "F3":
-                F3.clicked = true; await nonblock_wait(duration); F3.clicked = false; break;
-            case "F#3":
-                FS3.clicked = true; await nonblock_wait(duration); FS3.clicked = false; break;
-            case "G3":
-                G3.clicked = true; await nonblock_wait(duration); G3.clicked = false; break;
-            case "G#3":
-                GS3.clicked = true; await nonblock_wait(duration); GS3.clicked = false; break;
-            case "A3":
-                A3.clicked = true; await nonblock_wait(duration); A3.clicked = false; break;
-            case "A#3":
-                AS3.clicked = true; await nonblock_wait(duration); AS3.clicked = false; break;
-            case "B3":
-                B3.clicked = true; await nonblock_wait(duration); B3.clicked = false; break;
-            /////////////////////////////
-            case "C4":
-                C4.clicked = true; await nonblock_wait(duration); C4.clicked = false; break;
-            case "C#4":
-                CS4.clicked = true; await nonblock_wait(duration); CS4.clicked = false; break;
-            case "D4":
-                D4.clicked = true; await nonblock_wait(duration); D4.clicked = false; break;
-            case "D#4":
-                DS4.clicked = true; await nonblock_wait(duration); DS4.clicked = false; break;
-            case "E4":
-                E4.clicked = true; await nonblock_wait(duration); E4.clicked = false; break;
-            case "F4":
-                F4.clicked = true; await nonblock_wait(duration); F4.clicked = false; break;
-            case "F#4":
-                FS4.clicked = true; await nonblock_wait(duration); FS4.clicked = false; break;
-            case "G4":
-                G4.clicked = true; await nonblock_wait(duration); G4.clicked = false; break;
-            case "G#4":
-                GS4.clicked = true; await nonblock_wait(duration); GS4.clicked = false; break;
-            case "A4":
-                A4.clicked = true; await nonblock_wait(duration); A4.clicked = false; break;
-            case "A#4":
-                AS4.clicked = true; await nonblock_wait(duration); AS4.clicked = false; break;
-            case "B4":
-                B4.clicked = true; await nonblock_wait(duration); B4.clicked = false; break;
-            /////////////////////////////
-            case "C5":
-                C5.clicked = true; await nonblock_wait(duration); C5.clicked = false; break;
-            case "C#5":
-                CS5.clicked = true; await nonblock_wait(duration); CS5.clicked = false; break;
-            case "D5":
-                D5.clicked = true; await nonblock_wait(duration); D5.clicked = false; break;
-            case "D#5":
-                DS5.clicked = true; await nonblock_wait(duration); DS5.clicked = false; break;
-            case "E5":
-                E5.clicked = true; await nonblock_wait(duration); E5.clicked = false; break;
-            case "F5":
-                F5.clicked = true; await nonblock_wait(duration); F5.clicked = false; break;
-            case "F#5":
-                FS5.clicked = true; await nonblock_wait(duration); FS5.clicked = false; break;
-            case "G5":
-                G5.clicked = true; await nonblock_wait(duration); G5.clicked = false; break;
-            case "G#5":
-                GS5.clicked = true; await nonblock_wait(duration); GS5.clicked = false; break;
-            case "A5":
-                A5.clicked = true; await nonblock_wait(duration); A5.clicked = false; break;
-            case "A#5":
-                AS5.clicked = true; await nonblock_wait(duration); AS5.clicked = false; break;
-            case "B5":
-                B5.clicked = true; await nonblock_wait(duration); B5.clicked = false; break;
-            /////////////////////////////
-            case "C6":
-                C6.clicked = true; await nonblock_wait(duration); C6.clicked = false; break;
-            case "C#6":
-                CS6.clicked = true; await nonblock_wait(duration); CS6.clicked = false; break;
-            case "D6":
-                D6.clicked = true; await nonblock_wait(duration); D6.clicked = false; break;
-            case "D#6":
-                DS6.clicked = true; await nonblock_wait(duration); DS6.clicked = false; break;
-            case "E6":
-                E6.clicked = true; await nonblock_wait(duration); E6.clicked = false; break;
-            case "F6":
-                F6.clicked = true; await nonblock_wait(duration); F6.clicked = false; break;
-            case "F#6":
-                FS6.clicked = true; await nonblock_wait(duration); FS6.clicked = false; break;
-            case "G6":
-                G6.clicked = true; await nonblock_wait(duration); G6.clicked = false; break;
-            case "G#6":
-                GS6.clicked = true; await nonblock_wait(duration); GS6.clicked = false; break;
-            case "A6":
-                A6.clicked = true; await nonblock_wait(duration); A6.clicked = false; break;
-            case "A#6":
-                AS6.clicked = true; await nonblock_wait(duration); AS6.clicked = false; break;
-            case "B6":
-                B6.clicked = true; await nonblock_wait(duration); B6.clicked = false; break;
-            //////////////////////////////
-            case "C7":
-                C7.clicked = true; await nonblock_wait(duration); C7.clicked = false; break;
-            case "C#7":
-                CS7.clicked = true; await nonblock_wait(duration); CS7.clicked = false; break;
-            case "D7":
-                D7.clicked = true; await nonblock_wait(duration); D7.clicked = false; break;
-            case "D#7":
-                DS7.clicked = true; await nonblock_wait(duration); DS7.clicked = false; break;
-            case "E7":
-                E7.clicked = true; await nonblock_wait(duration); E7.clicked = false; break;
-            case "F7":
-                F7.clicked = true; await nonblock_wait(duration); F7.clicked = false; break;
-            case "F#7":
-                FS7.clicked = true; await nonblock_wait(duration); FS7.clicked = false; break;
-            case "G7":
-                G7.clicked = true; await nonblock_wait(duration); G7.clicked = false; break;
-            case "G#7":
-                GS7.clicked = true; await nonblock_wait(duration); GS7.clicked = false; break;
-            case "A7":
-                A7.clicked = true; await nonblock_wait(duration); A7.clicked = false; break;
-            case "A#7":
-                AS7.clicked = true; await nonblock_wait(duration); AS7.clicked = false; break;
-            case "B7":
-                B7.clicked = true; await nonblock_wait(duration); B7.clicked = false; break;
-            default:
-                // console.log("fail", key);
-            /////////////////////////////
-            }
+  // Warm just two notes per octave (C, F#) to trigger white/black sample groups
+  async function prewarmOctave(oct, tapMs = 10) {
+    const names = [`C${oct}`, `F#${oct}`];
+    for (const nm of names) {
+      const m = nameToMidi(nm);
+      if (pianoInput && typeof pianoInput.keyDown === 'function' && m != null) {
+        try {
+          pianoInput.keyDown(m, 0.25);
+          await wait(tapMs);
+          pianoInput.keyUp(m);
+          await wait(tapMs);
+          continue;
+        } catch {}
+      }
+      const el = keys[nm];
+      if (!el) continue;
+      el.clicked = true; await wait(tapMs); el.clicked = false; await wait(tapMs);
+    }
+    warmedOctaves.add(String(oct));
+  }
+
+  function octavesUsedAtCurrentTranspose() {
+    if (!notes.length) return [];
+    const used = new Set();
+    const step = Math.ceil(notes.length / 1000); // cap sample points
+    for (let i = 0; i < notes.length; i += step) {
+      const nm = transposedName(notes[i].name, transposeOffset);
+      const oc = nameToOctave(nm);
+      if (oc) used.add(oc);
+    }
+    return [...used].sort((a, b) => a - b);
+  }
+
+  async function prewarmUsedOctavesSoon() {
+    const run = async () => {
+      await ensureInstrumentReady();
+      const used = octavesUsedAtCurrentTranspose();
+      for (const oc of used) {
+        if (!warmedOctaves.has(String(oc))) {
+          await prewarmOctave(oc, 10);
+          await wait(60);
         }
+      }
+      updateStatus(`Ready. Warmed: ${[...warmedOctaves].join(', ') || 'none'}`);
+    };
+    if ('requestIdleCallback' in window) {
+      window.requestIdleCallback(run, { timeout: 2000 });
+    } else {
+      setTimeout(run, 0);
+    }
+  }
 
-// Velocity 조정
-// document.querySelector('piano-input').keyDown(31.0, 0.4) // HTML에서 G2의 note는 31이라 되어있는데 parameter와 이 값이 동일함. keyDown(float note, float velocity)
-// document.querySelector('piano-input').keyUp(31.0)
+  async function ensureOctaveWarmedForName(name) {
+    const oc = nameToOctave(name);
+    if (!oc || warmedOctaves.has(String(oc))) return;
+    await prewarmOctave(oc, 8);
+  }
 
+  // -------------------- Scheduler --------------------
+  const pendingTimeouts = new Set();
 
+  function clearPendingTimeouts() {
+    for (const id of pendingTimeouts) clearTimeout(id);
+    pendingTimeouts.clear();
+  }
 
-// start when enter pressed
-document.addEventListener("keydown", event => {
-    if (event.keyCode == 13) {
-        start();
+  function resetPlayback() {
+    clearInterval(scheduleTimer);
+    scheduleTimer = null;
+    clearPendingTimeouts();
+    stopAutoSustain();
+    currentIndex = 0;
+    offsetTimeSec = 0;
+    startEpoch = 0;
+    stopProgressUpdater();
+    updateSeekUI(0);
+  }
+
+  function scheduleNote(i) {
+    const n = notes[i];
+    const s = Math.max(0.0001, speedFactor);
+    const effectiveStartSec = n.time / s;
+    const effectiveDurationMs = (n.duration / s) * 1000;
+
+    const nm = transposedName(n.name, transposeOffset);
+    ensureOctaveWarmedForName(nm);
+
+    const playhead = offsetTimeSec + (nowSec() - startEpoch);
+    const delayMs = Math.max(0, (effectiveStartSec - playhead) * 1000);
+
+    const tid = setTimeout(() => {
+      pendingTimeouts.delete(tid);
+      const liveName = transposedName(n.name, transposeOffset);
+      try {
+        press_and_schedule(liveName, effectiveDurationMs);
+      } catch {}
+    }, delayMs);
+    pendingTimeouts.add(tid);
+  }
+
+  function schedulerTick() {
+    if (playState !== 'playing') return;
+    const elapsed = nowSec() - startEpoch;
+    const playhead = offsetTimeSec + elapsed; // effective timeline time
+    const s = Math.max(0.0001, speedFactor);
+
+    while (
+      currentIndex < notes.length &&
+      (notes[currentIndex].time / s) <= playhead + scheduleAheadSec
+    ) {
+      scheduleNote(currentIndex);
+      currentIndex++;
     }
 
-    if (event.key == 'm' && event.ctrlKey) {
-        input.click();
+    if (currentIndex >= notes.length) {
+      stop(); // done
+    }
+  }
 
-        // const midi = window.prompt("midi (json format)", "");
-        // data = JSON.parse(midi);
-        // bpm = Math.floor(data.header.tempos[0].bpm);
-        // sus_interval = 480000 / bpm // 2마디
-        // if (sus_interval > 3) sus_interval /= 2;
-        // // selected_tracks = [ data.tracks[0], data.tracks[1] ];
-        // notes = merge(data);
+  // --- binary search for seeking (effective timeline) ---
+  function findIndexForEffectiveTime(targetSec) {
+    let lo = 0, hi = notes.length;
+    const s = Math.max(0.0001, speedFactor);
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      const t = notes[mid].time / s;
+      if (t < targetSec) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  async function play() {
+    if (!notes.length) {
+      updateStatus('No MIDI loaded. Use "Load".');
+      return;
+    }
+    await resumeAudioIfNeeded();
+    await ensureInstrumentReady();
+
+    if (playState === 'stopped') {
+      currentIndex = 0;
+      offsetTimeSec = 0;
+      warmedOctaves.clear();
+      prewarmUsedOctavesSoon();
+      updateSeekUI(0);
     }
 
-    if (event.keyCode == 40) { // down
-        clearInterval(id);
-        sus_interval /= 2;
-        id = setInterval(function() {release(); sustain();}, sus_interval);
+    if (autoSustain) beginAutoSustain();
+
+    startEpoch = nowSec();
+    playState = 'playing';
+    updateButtons();
+    updateStatus(`Playing… ${speedFactor}×`);
+    startProgressUpdater();
+
+    clearInterval(scheduleTimer);
+    scheduleTimer = setInterval(schedulerTick, lookaheadMs);
+  }
+
+  function pause() {
+    if (playState !== 'playing') return;
+    offsetTimeSec += nowSec() - startEpoch;
+    playState = 'paused';
+    clearInterval(scheduleTimer);
+    scheduleTimer = null;
+    clearPendingTimeouts();
+    stopAutoSustain();
+    updateButtons();
+    updateStatus('Paused.');
+    stopProgressUpdater();
+  }
+
+  function stop() {
+    if (playState === 'stopped') return;
+    playState = 'stopped';
+    resetPlayback();
+    updateButtons();
+    updateStatus('Stopped.');
+  }
+
+  function resume() {
+    if (playState !== 'paused') return;
+    startEpoch = nowSec();
+    playState = 'playing';
+    if (autoSustain) beginAutoSustain();
+    updateButtons();
+    updateStatus(`Playing… ${speedFactor}×`);
+    startProgressUpdater();
+    clearInterval(scheduleTimer);
+    scheduleTimer = setInterval(schedulerTick, lookaheadMs);
+  }
+
+  // -------------------- Speed changes (keep musical position) --------------------
+  function setSpeed(newSpeed) {
+    const ns = Math.max(0.0001, Number(newSpeed));
+    const old = speedFactor;
+
+    // keep absolute musical position (original timeline) constant
+    const effectiveNow = (playState === 'playing') ? offsetTimeSec + (nowSec() - startEpoch) : offsetTimeSec;
+    const absOriginalSec = effectiveNow * old;         // convert back to original timeline seconds
+    speedFactor = ns;
+    const newEffective = absOriginalSec / speedFactor; // convert to new effective timeline
+
+    // reset timers around new position
+    offsetTimeSec = newEffective;
+    startEpoch = nowSec();
+
+    clearPendingTimeouts();
+    currentIndex = findIndexForEffectiveTime(offsetTimeSec);
+    if (playState === 'playing') {
+      if (autoSustain) beginAutoSustain(); // adjust sustain interval
+      clearInterval(scheduleTimer);
+      scheduleTimer = setInterval(schedulerTick, lookaheadMs);
+      updateStatus(`Playing… ${speedFactor}×`);
+    }
+    updateSeekRange();
+    updateSeekUI(offsetTimeSec);
+  }
+
+  // -------------------- Seek bar --------------------
+  function effectiveDurationSec() {
+    return pieceDurationSec / Math.max(0.0001, speedFactor);
+  }
+
+  function updateSeekRange() {
+    const max = Math.max(0.01, effectiveDurationSec());
+    if (ui.seekRange) {
+      ui.seekRange.max = String(max);
+    }
+    if (ui.seekManualMax) {
+      ui.seekManualMax.textContent = ` / ${max.toFixed(2)}s`;
+    }
+  }
+
+  function updateSeekUI(effSec) {
+    if (ui.seekRange) ui.seekRange.value = String(clamp(effSec, 0, effectiveDurationSec()));
+    if (ui.seekVal) ui.seekVal.textContent = `${effSec.toFixed(2)}s`;
+  }
+
+  function setSeekPosition(effSec) {
+    const t = clamp(Number(effSec) || 0, 0, effectiveDurationSec());
+    // move playhead (don’t change play/pause state)
+    offsetTimeSec = t;
+    startEpoch = nowSec();
+    clearPendingTimeouts();
+    currentIndex = findIndexForEffectiveTime(offsetTimeSec);
+    if (playState === 'playing') {
+      clearInterval(scheduleTimer);
+      scheduleTimer = setInterval(schedulerTick, lookaheadMs);
+    }
+    updateSeekUI(offsetTimeSec);
+  }
+
+  function startProgressUpdater() {
+    stopProgressUpdater();
+    progressTimer = setInterval(() => {
+      const eff = (playState === 'playing') ? offsetTimeSec + (nowSec() - startEpoch) : offsetTimeSec;
+      updateSeekUI(eff);
+    }, 100);
+  }
+  function stopProgressUpdater() {
+    if (progressTimer) clearInterval(progressTimer);
+    progressTimer = null;
+  }
+
+  // -------------------- UI Panel (Truly draggable + autosize) --------------------
+  function buildUI() {
+    const container = document.createElement('div');
+    container.id = 'sp-playbot-ui';
+    container.innerHTML = `
+      <style>
+        #sp-playbot-ui {
+          position: fixed;
+          /* No bottom/right anchoring here. We’ll set left/top inline for full control. */
+          z-index: 100000;
+          background: rgba(255,255,255,0.96);
+          backdrop-filter: blur(3px);
+          border: 1px solid #cfcfcf;
+          border-radius: 10px;
+          padding: 8px 10px;
+          font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+          color: #333;
+          box-shadow: 0 8px 22px rgba(0,0,0,0.15);
+          width: fit-content;
+          max-width: 90vw;
+          max-height: 90vh;
+          overflow: auto;
+          box-sizing: border-box;
+          touch-action: none; /* smoother dragging on touch/pen */
+        }
+        #sp-playbot-ui .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
+        #sp-playbot-ui button {
+          border: 1px solid #bbb; border-radius: 6px; padding: 6px 10px; cursor: pointer;
+          background: #fff; color: #333; font-weight: 600;
+        }
+        #sp-playbot-ui button.primary { background: #4c8bf5; color: #fff; border-color: #3d72c8; }
+        #sp-playbot-ui button:disabled { opacity: .5; cursor: not-allowed; }
+        #sp-playbot-ui .badge { font-size: 12px; padding: 2px 6px; border-radius: 6px; background: #f0f0f0; }
+        #sp-playbot-ui .label { font-size: 12px; color: #666; }
+        #sp-playbot-ui input[type="range"] { width: 180px; }
+        #sp-playbot-ui input[type="number"] { width: 84px; padding: 4px 6px; }
+        #sp-playbot-ui .titlebar {
+          display: flex; align-items: center; justify-content: space-between;
+          margin-bottom: 4px; cursor: move; user-select: none;
+        }
+        #sp-playbot-ui .titlebar .title { font-weight: 700; font-size: 13px; letter-spacing: .2px; }
+        #sp-advanced { display: none; border-top: 1px dashed #ddd; padding-top: 6px; margin-top: 6px; }
+        #sp-advanced-toggle { margin-left: auto; font-size: 12px; color: #555; cursor: pointer; }
+      </style>
+
+      <div class="titlebar" id="sp-drag-handle">
+        <div class="title">Playbot Controls</div>
+        <span id="sp-status" class="badge">Idle</span>
+      </div>
+
+      <div class="row">
+        <button id="sp-load">Load</button>
+        <button id="sp-play" class="primary">Play</button>
+        <button id="sp-pause">Pause</button>
+        <button id="sp-stop">Stop</button>
+        <span id="sp-advanced-toggle">Advanced ▾</span>
+      </div>
+
+      <div class="row">
+        <span class="label">Seek:</span>
+        <input id="sp-seek-range" type="range" min="0" max="1" step="0.01">
+        <span id="sp-seek-val" class="badge">0.00s</span>
+        <input id="sp-seek-manual" type="number" placeholder="seconds">
+        <span id="sp-seek-max" class="label">/ 0.00s</span>
+      </div>
+
+      <div class="row">
+        <span class="label">Transpose:</span>
+        <button id="sp-transpose-minus">−</button>
+        <span id="sp-transpose-val" class="badge">0</span>
+        <button id="sp-transpose-plus">+</button>
+        <input id="sp-transpose-manual" type="number" placeholder="semitones">
+      </div>
+
+      <div class="row">
+        <span class="label">Sustain:</span>
+        <button id="sp-sustain-toggle">Auto: On</button>
+        <input id="sp-sustain-range" type="range" min="50" max="8000" step="50">
+        <span id="sp-sustain-val" class="badge"></span>
+        <label style="display:flex; align-items:center; gap:4px;">
+          <input id="sp-sustain-link" type="checkbox" checked />
+          <span class="label">Link to speed</span>
+        </label>
+        <input id="sp-sustain-manual" type="number" placeholder="ms (any)">
+      </div>
+
+      <div class="row">
+        <span class="label">Speed:</span>
+        <input id="sp-speed-range" type="range" min="0.50" max="2.00" step="0.05">
+        <span id="sp-speed-val" class="badge">1.00×</span>
+        <input id="sp-speed-manual" type="number" placeholder="e.g. 2.5 (any)">
+      </div>
+
+      <div id="sp-advanced">
+        <div class="row">
+          <span class="label">Lookahead (ms):</span>
+          <input id="sp-lookahead-manual" type="number" placeholder="25">
+          <span class="label">Schedule ahead (s):</span>
+          <input id="sp-sahead-manual" type="number" placeholder="0.20">
+        </div>
+      </div>
+    `;
+    document.body.appendChild(container);
+
+    // Place initial position bottom-right using left/top (no bottom/right anchoring)
+    const savedPos = lsGet('sp_ui_pos', null);
+    if (savedPos && typeof savedPos.left === 'number' && typeof savedPos.top === 'number') {
+      container.style.left = `${savedPos.left}px`;
+      container.style.top  = `${savedPos.top}px`;
+    } else {
+      // After layout, measure and position 20px from bottom-right
+      requestAnimationFrame(() => {
+        const rect = container.getBoundingClientRect();
+        const left = Math.max(10, window.innerWidth - rect.width - 20);
+        const top  = Math.max(10, window.innerHeight - rect.height - 20);
+        container.style.left = `${left}px`;
+        container.style.top  = `${top}px`;
+      });
     }
 
-    if (event.keyCode == 38) { // up
-        clearInterval(id);
-        sus_interval *= 2;
-        id = setInterval(function() {release(); sustain();}, sus_interval);
+    // Dragging (pure top/left, no bottom/right at all)
+    const handle = container.querySelector('#sp-drag-handle');
+    let dragging = false;
+    let dragOffsetX = 0;
+    let dragOffsetY = 0;
+
+    const onPointerDown = (e) => {
+      dragging = true;
+      const rect = container.getBoundingClientRect();
+      dragOffsetX = e.clientX - rect.left;
+      dragOffsetY = e.clientY - rect.top;
+      container.setPointerCapture?.(e.pointerId);
+    };
+    const onPointerMove = (e) => {
+      if (!dragging) return;
+      const left = e.clientX - dragOffsetX;
+      const top  = e.clientY - dragOffsetY;
+      // Keep within viewport a bit (10px margins)
+      const maxLeft = window.innerWidth - container.offsetWidth - 10;
+      const maxTop  = window.innerHeight - container.offsetHeight - 10;
+      container.style.left = `${clamp(left, 10, Math.max(10, maxLeft))}px`;
+      container.style.top  = `${clamp(top, 10, Math.max(10, maxTop))}px`;
+    };
+    const onPointerUp = (e) => {
+      dragging = false;
+      container.releasePointerCapture?.(e.pointerId);
+      const rect = container.getBoundingClientRect();
+      lsSet('sp_ui_pos', { left: rect.left, top: rect.top });
+    };
+
+    handle.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+
+    // Wire controls
+    ui.root       = container;
+    ui.status     = container.querySelector('#sp-status');
+
+    ui.loadBtn    = container.querySelector('#sp-load');
+    ui.playBtn    = container.querySelector('#sp-play');
+    ui.pauseBtn   = container.querySelector('#sp-pause');
+    ui.stopBtn    = container.querySelector('#sp-stop');
+
+    ui.seekRange  = container.querySelector('#sp-seek-range');
+    ui.seekVal    = container.querySelector('#sp-seek-val');
+    ui.seekManual = container.querySelector('#sp-seek-manual');
+    ui.seekManualMax = container.querySelector('#sp-seek-max');
+
+    ui.trMinus    = container.querySelector('#sp-transpose-minus');
+    ui.trPlus     = container.querySelector('#sp-transpose-plus');
+    ui.trVal      = container.querySelector('#sp-transpose-val');
+    ui.trManual   = container.querySelector('#sp-transpose-manual');
+
+    ui.susToggle  = container.querySelector('#sp-sustain-toggle');
+    ui.susRange   = container.querySelector('#sp-sustain-range');
+    ui.susVal     = container.querySelector('#sp-sustain-val');
+    ui.susLink    = container.querySelector('#sp-sustain-link');
+    ui.susManual  = container.querySelector('#sp-sustain-manual');
+
+    ui.speedRange = container.querySelector('#sp-speed-range');
+    ui.speedVal   = container.querySelector('#sp-speed-val');
+    ui.speedManual= container.querySelector('#sp-speed-manual');
+
+    ui.advToggle  = container.querySelector('#sp-advanced-toggle');
+    ui.advPanel   = container.querySelector('#sp-advanced');
+    ui.lookaheadManual = container.querySelector('#sp-lookahead-manual');
+    ui.sAheadManual    = container.querySelector('#sp-sahead-manual');
+
+    ui.loadBtn.addEventListener('click', () => input.click());
+    ui.playBtn.addEventListener('click', () => { if (playState === 'paused') resume(); else play(); });
+    ui.pauseBtn.addEventListener('click', () => pause());
+    ui.stopBtn.addEventListener('click', () => stop());
+
+    // Seek
+    ui.seekRange.addEventListener('input', () => setSeekPosition(Number(ui.seekRange.value)));
+    ui.seekRange.addEventListener('change', () => setSeekPosition(Number(ui.seekRange.value)));
+    ui.seekManual.addEventListener('change', () => setSeekPosition(Number(ui.seekManual.value)));
+
+    // Transpose
+    ui.trMinus.addEventListener('click', async () => {
+      transposeOffset -= 1;
+      ui.trVal.textContent = String(transposeOffset);
+      await prewarmUsedOctavesSoon();
+    });
+    ui.trPlus.addEventListener('click', async () => {
+      transposeOffset += 1;
+      ui.trVal.textContent = String(transposeOffset);
+      await prewarmUsedOctavesSoon();
+    });
+    ui.trManual.addEventListener('change', async () => {
+      const v = Math.round(Number(ui.trManual.value) || 0);
+      transposeOffset = v;
+      ui.trVal.textContent = String(transposeOffset);
+      await prewarmUsedOctavesSoon();
+    });
+
+    // Sustain
+    ui.susRange.addEventListener('input', () => {
+      sustainMs = parseInt(ui.susRange.value, 10);
+      ui.susVal.textContent = `${sustainMs} ms`;
+      if (playState === 'playing' && autoSustain) beginAutoSustain();
+    });
+    ui.susManual.addEventListener('change', () => {
+      const v = Math.abs(Number(ui.susManual.value) || sustainMs);
+      sustainMs = v;
+      ui.susVal.textContent = `${sustainMs} ms`;
+      ui.susRange.value = String(clamp(sustainMs, 50, 8000)); // slider stays sane, manual is unlimited
+      if (playState === 'playing' && autoSustain) beginAutoSustain();
+    });
+    ui.susToggle.addEventListener('click', () => {
+      autoSustain = !autoSustain;
+      ui.susToggle.textContent = `Auto: ${autoSustain ? 'On' : 'Off'}`;
+      if (playState === 'playing') { if (autoSustain) beginAutoSustain(); else stopAutoSustain(); }
+    });
+    ui.susLink.addEventListener('change', () => {
+      linkSustainToTempo = ui.susLink.checked;
+      if (playState === 'playing' && autoSustain) beginAutoSustain();
+    });
+
+    // Speed
+    ui.speedRange.addEventListener('input', () => {
+      const v = parseFloat(ui.speedRange.value);
+      setSpeed(v);
+      ui.speedVal.textContent = `${speedFactor.toFixed(2)}×`;
+      ui.speedManual.value = ''; // keep manual separate
+    });
+    ui.speedManual.addEventListener('change', () => {
+      const v = Number(ui.speedManual.value);
+      if (isFinite(v) && v !== 0) {
+        setSpeed(Math.abs(v)); // any positive number (unlimited)
+        ui.speedVal.textContent = `${speedFactor}×`;
+      }
+    });
+
+    // Advanced
+    ui.advToggle.addEventListener('click', () => {
+      const open = ui.advPanel.style.display !== 'none';
+      ui.advPanel.style.display = open ? 'none' : 'block';
+      ui.advToggle.textContent = open ? 'Advanced ▾' : 'Advanced ▴';
+    });
+    ui.lookaheadManual.addEventListener('change', () => {
+      const v = Math.abs(Number(ui.lookaheadManual.value) || lookaheadMs);
+      lookaheadMs = v;
+      if (playState === 'playing') {
+        clearInterval(scheduleTimer);
+        scheduleTimer = setInterval(schedulerTick, lookaheadMs);
+      }
+    });
+    ui.sAheadManual.addEventListener('change', () => {
+      const v = Math.abs(Number(ui.sAheadManual.value) || scheduleAheadSec);
+      scheduleAheadSec = v;
+    });
+
+    // Initialize values
+    ui.trVal.textContent = String(transposeOffset);
+    ui.susRange.value = sustainMs;
+    ui.susVal.textContent = `${sustainMs} ms`;
+    ui.susLink.checked = linkSustainToTempo;
+    ui.speedRange.value = speedFactor.toFixed(2);
+    ui.speedVal.textContent = `${speedFactor.toFixed(2)}×`;
+    ui.lookaheadManual.value = String(lookaheadMs);
+    ui.sAheadManual.value = String(scheduleAheadSec);
+    updateButtons();
+    updateSeekRange();
+    updateSeekUI(0);
+  }
+
+  function updateButtons() {
+    if (!ui.playBtn) return;
+    ui.playBtn.textContent = (playState === 'paused') ? 'Resume' : 'Play';
+    ui.playBtn.disabled = (playState === 'playing' && currentIndex >= notes.length);
+    ui.pauseBtn.disabled = (playState !== 'playing');
+    ui.stopBtn.disabled = (playState === 'stopped');
+  }
+  function updateStatus(text) {
+    if (ui.status) ui.status.textContent = text;
+    else console.log(text);
+  }
+
+  // -------------------- Keyboard shortcuts (optional) --------------------
+  document.addEventListener('keydown', async (event) => {
+    if (event.key === 'Enter') {
+      if (playState === 'paused') await resume(); else await play();
+    }
+    if (event.key === 'm' && event.ctrlKey) {
+      input.click();
     }
 
-    if (event.keyCode == 39) { // right
-        clearInterval(id);
-        sus_interval = 100;
-        id = setInterval(function() {release(); sustain();}, 100);
+    // Sustain quick tweaks
+    if (event.keyCode === 40) { // down
+      sustainMs = Math.max(1, Math.floor(sustainMs / 2));
+      if (ui.susRange) ui.susRange.value = String(clamp(sustainMs, 50, 8000));
+      if (ui.susVal) ui.susVal.textContent = `${sustainMs} ms`;
+      if (playState === 'playing' && autoSustain) beginAutoSustain();
+    }
+    if (event.keyCode === 38) { // up
+      sustainMs = Math.floor(sustainMs * 2);
+      if (ui.susRange) ui.susRange.value = String(clamp(sustainMs, 50, 8000));
+      if (ui.susVal) ui.susVal.textContent = `${sustainMs} ms`;
+      if (playState === 'playing' && autoSustain) beginAutoSustain();
     }
 
-    if (event.keyCode == 37) { // left
-        clearInterval(id);
-        release();
+    // Transpose
+    if (event.keyCode === 189) { // minus
+      transposeOffset -= 1;
+      if (ui.trVal) ui.trVal.textContent = String(transposeOffset);
+      await prewarmUsedOctavesSoon();
     }
-
-    if (event.keyCode == 189) { // minus
-        (async () => {
-            await release_all_key()
-                .then(() => {
-                in_transpose(-1)
-                document.getElementById("offset-value").textContent = offset;
-                console.log('transpose offset:',offset);
-            });
-        })();
+    if (event.keyCode === 187) { // plus
+      transposeOffset += 1;
+      if (ui.trVal) ui.trVal.textContent = String(transposeOffset);
+      await prewarmUsedOctavesSoon();
     }
+  });
 
-    if (event.keyCode == 187) { // plus
-        (async () => {
-            await release_all_key()
-                .then(() => {
-                in_transpose(1)
-                document.getElementById("offset-value").textContent = offset;
-                console.log('transpose offset:',offset);
-            });
-        })();
-    }
-});
+  // -------------------- Boot --------------------
+  (async () => {
+    await buildUI();
+    await whenDefined('piano-keyboard');
+    await whenDefined('piano-logo');
 
+    // Cosmetic header tag
+    try {
+      const logoHost = document.querySelector('piano-logo');
+      const headerLogo = logoHost?.shadowRoot?.getElementById('header-logo');
+      if (headerLogo) {
+        const sublogo_html = `
+          <sub-logo>
+            bot 3.1
+            <style>
+              sub-logo {
+                font-family: Quicksand, sans-serif;
+                text-transform: uppercase; font-weight: 700; color: white;
+                text-align: center; font-size: 12px; letter-spacing: 1px;
+                margin: auto; margin-left: 10px; padding: 5px 12px;
+                background-color: #b064ff; border: none; border-radius: 7px;
+              }
+            </style>
+          </sub-logo>`;
+        headerLogo.insertAdjacentHTML('afterend', sublogo_html);
+      }
+    } catch {}
 
+    await mapKeyboard();
+    updateStatus('Ready. Load a MIDI (Ctrl+M). Drag the panel anywhere.');
+  })();
 
-// in-position transpose
-var offset = 0;
-function transpose_redefine(offset) {
-    let piano_kb = document.querySelector('piano-keyboard')
-    piano_kb.keyDown = function({midi: t}, e/*,o=!1*/) {
-//      if (o && !r.live) return;
-        const i = Math.floor((t-offset) / 12)
-        , s = this.shadowRoot.querySelector(`piano-keyboard-octave[octave="${i}"]`);
-        null == s || s.keyDown(t, e),
-            this.activeNotes.add(t)
-    }
-    piano_kb.keyUp = function({midi: t}, e) {
-        const o = Math.floor((t-offset) / 12)
-        , i = this.shadowRoot.querySelector(`piano-keyboard-octave[octave="${o}"]`);
-        null == i || i.keyUp(t, e),
-            this.activeNotes.delete(t)
-    }
-}
-
-function in_transpose(command) {
-    offset += command;
-    p.forEach(bw=>{bw.shadowRoot.querySelectorAll("piano-keyboard-note").forEach(key=>{if(key.note) {key.note += command; key.setAttribute("note", `${key.note}`);}})})
-    transpose_redefine(offset);
-}
-
-function release_all_key() {
-    p.forEach(bw=>{bw.shadowRoot.querySelectorAll("piano-keyboard-note").forEach(key=>{key.clicked=false;})})
-    return Promise.resolve();
-}
-
-
-
-// 스크롤러 오프셋, 컬러조정
-// document.querySelector('piano-roll').shadowRoot.querySelector('piano-roll-canvas').noteOffsets = [...]
-// document.querySelector('piano-roll').shadowRoot.querySelector('piano-roll-canvas').noteColors = [...]
-
-
-
-/* data -> json 파트인데 문제 많아서 일단 보류.
-// Reminder: should replace data.fromUrl() bc of the CORS problem
-const datafile = fromUrlNoCors("https://download.mail.naver.com/file/download/each/?attachType=normal&mailSN=790&attachIndex=2&virus=1&domain=mail.naver.com&u=hirit808")
-const name = data.name
-
-data.tracks.forEach(track => {
-  //tracks have notes and controlChanges
-  //notes are an array
-  const notes = track.notes
-  notes.forEach(note => {
-    //note.data, note.time, note.duration, note.name
-  })
-  //the control changes are an object
-  //the keys are the CC number
-  track.controlChanges[64]
-  //they are also aliased to the CC number's common name (if it has one)
-  track.controlChanges.sustain.forEach(cc => {
-    // cc.ticks, cc.value, cc.time
-  })
-  //the track also has a channel and instrument
-  //track.instrument.name
-})
-
-*/
+})();
