@@ -903,7 +903,7 @@
       if (headerLogo) {
         const sublogo_html = `
           <sub-logo>
-            bot 3.1
+            bot 2.0
             <style>
               sub-logo {
                 font-family: Quicksand, sans-serif;
